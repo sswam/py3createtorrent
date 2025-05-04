@@ -334,31 +334,34 @@ def create_multi_file_info(
     return info
 
 
-def get_files_in_directory(
-    directory: str,
+def get_files_from_path(
+    path: str,  # Changed from 'directory' to 'path' to reflect it can be either
     excluded_paths: Optional[Set[str]] = None,
     relative_to: Optional[str] = None,
     excluded_regexps: Optional[Set[Pattern[str]]] = None,
 ) -> List[str]:
     """
-    Return a list containing the paths to all files in the given directory.
+    Return a list containing the paths to all files in the given path.
+    If path is a file, returns a list containing just that file.
+    If path is a directory, returns all files within it recursively.
 
     Paths in excluded_paths are skipped. These should be os.path.normcase()-d.
-    Of course, the initial directory cannot be excluded.
+    Of course, the initial path cannot be excluded.
     Paths matching any of the regular expressions in excluded_regexps are
     skipped, too. The regexps must be compiled by the caller.
-    In both cases, absolute paths are used for matching.
 
     The paths may be returned relative to a specific directory. By default,
-    this is the initial directory itself.
+    this is the initial directory itself if the input is a directory,
+    or the parent directory if the input is a file.
 
-    Please note: Only paths to files are returned!
-
+    @param path: The path to scan.
+    @param excluded_paths: A set of paths to exclude.
+    @param relative_to: The directory to which the paths should be relative.
     @param excluded_regexps: A set of compiled regular expressions.
     """
     # Argument validation:
-    if not isinstance(directory, str):
-        raise TypeError("directory must be instance of: str")
+    if not isinstance(path, str):
+        raise TypeError("path must be instance of: str")
 
     if excluded_paths is None:
         excluded_paths = set()
@@ -376,6 +379,12 @@ def get_files_in_directory(
         excluded_regexps = set()
     elif not isinstance(excluded_regexps, set):
         raise TypeError("excluded_regexps must be instance of: set")
+
+    # Handle file input directly
+    if os.path.isfile(path):
+        if relative_to is None:
+            relative_to = os.path.dirname(path)
+        return [os.path.relpath(path, relative_to)]
 
     # Helper function:
     def _get_files_in_directory(
@@ -461,6 +470,9 @@ def get_files_in_directory(
     )
 
     return files
+
+
+get_files_in_directory = get_files_from_path
 
 
 def split_path(path: str) -> List[str]:
@@ -613,7 +625,7 @@ def raise_error(
 
 
 def create_torrent(
-    path: str,
+    paths: str,
     trackers: List[str] = [],
     nodes: List[str] = [],
     piece_length: int = 0,
@@ -627,6 +639,7 @@ def create_torrent(
     exclude: List[str] = [],
     exclude_pattern: List[str] = [],
     exclude_pattern_ci: List[str] = [],
+    relative_to: Optional[str] = None,
     date: Optional[Union[Literal[False], int]] = None,
     name: Optional[str] = None,
     threads: int = 4,
@@ -640,8 +653,8 @@ def create_torrent(
 
     Parameters
     ----------
-    path
-        File or folder for which to create a torrent
+    paths
+        Files or folders for which to create a torrent
     trackers, optional
         Add one or multiple tracker (announce) URLs to the torrent file, by default []
     nodes, optional
@@ -668,6 +681,8 @@ def create_torrent(
         Exclude paths matching a regular expression, by default []
     exclude_pattern_ci, optional
         Same as exclude_pattern but case-insensitive, by default []
+    relative_to, optional
+        Set the base directory for relative paths, by default None, which means the initial directory.
     date, optional
         Overwrite creation date. This option expects a unix timestamp, None means current time, False means no time at all, by default None
     name, optional
@@ -752,11 +767,12 @@ def create_torrent(
     #   - length and md5sum (if single file)
     #   - name (may be overwritten in the next section by the --name option)
 
-    input_path: str = path
+    input_paths: list[str] = paths
 
     # Validate the given path.
-    if not os.path.isfile(input_path) and not os.path.isdir(input_path):
-        raise_error("'%s' neither is a file nor a directory." % input_path, _parser)
+    for input_path in input_paths:
+        if not os.path.isfile(input_path) and not os.path.isdir(input_path):
+            raise_error("'%s' neither is a file nor a directory." % input_path, _parser)
 
     # Evaluate / apply the tracker abbreviations.
     trackers = replace_in_list(trackers, config.tracker_abbreviations)
@@ -851,7 +867,7 @@ def create_torrent(
     excluded_regexps |= set(re.compile(regexp, re.IGNORECASE) for regexp in exclude_pattern_ci)
 
     # Warn the user if he attempts to exclude any paths when creating a torrent for a single file (makes no sense).
-    if os.path.isfile(input_path) and (len(excluded_paths) > 0 or len(excluded_regexps) > 0):
+    if len(input_paths) == 1 and os.path.isfile(input_paths[0]) and (len(excluded_paths) > 0 or len(excluded_regexps) > 0):
         print(
             "Warning: Excluding paths is not possible when creating a torrent for a single file.",
             file=sys.stderr,
@@ -865,15 +881,26 @@ def create_torrent(
                 file=sys.stderr,
             )
 
+    # Parse relative_to parameter.
+    if relative_to is None and len(input_paths) > 1:
+        relative_to = os.path.commonpath([os.path.dirname(os.path.abspath(p)) for p in input_paths])
+    elif relative_to:
+        if not os.path.isdir(relative_to):
+            raise_error("Relative path must be a directory.", _parser)
+
     # Get the torrent's files and / or calculate its size.
     printv("Scanning size of input file/s...")
-    if os.path.isfile(input_path):
-        torrent_size = os.path.getsize(input_path)
+    torrent_files = []
+    for input_path in input_paths:
+        torrent_files += get_files_from_path(input_path,
+                                             excluded_paths=excluded_paths,
+                                             excluded_regexps=excluded_regexps,
+                                             relative_to=relative_to)
+    if relative_to is None and len(input_paths) == 1 and os.path.isfile(input_paths[0]):
+        torrent_size = os.path.getsize(input_paths[0])
     else:
-        torrent_files = get_files_in_directory(input_path,
-                                               excluded_paths=excluded_paths,
-                                               excluded_regexps=excluded_regexps)
-        torrent_size = sum([os.path.getsize(os.path.join(input_path, file)) for file in torrent_files])
+        base_dir = relative_to or input_paths[0]
+        torrent_size = sum([os.path.getsize(os.path.join(base_dir, file)) for file in torrent_files])
 
     # Torrents for 0 byte data can't be created.
     if torrent_size == 0:
@@ -895,11 +922,11 @@ def create_torrent(
 
     # Do the main work now.
     # -> prepare the metainfo dictionary.
-    if os.path.isfile(input_path):
-        info = create_single_file_info(input_path, piece_length, include_md5, threads=threads)
+    if relative_to is None:
+        info = create_single_file_info(input_paths[0], piece_length, include_md5, threads=threads)
     else:
         info = create_multi_file_info(
-            input_path,
+            relative_to,
             torrent_files,  # type:ignore
             piece_length,
             include_md5,
@@ -1255,6 +1282,17 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "-r",
+        "--relative-to",
+        type=str,
+        action="store",
+        dest="relative_to",
+        default=None,
+        metavar="PATH",
+        help="Use this directory as base for relative paths.\n" + "[default: <target directory>]",
+    )
+
+    parser.add_argument(
         "-d",
         "--date",
         type=int,
@@ -1323,15 +1361,16 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "path",
-        metavar="target <path>",
-        help="File or folder for which to create a torrent",
+        "paths",
+        metavar="PATH",
+        nargs="+",  # Allow one or more paths
+        help="Files or folders for which to create torrents"
     )
 
     args = parser.parse_args()
 
     create_torrent(
-        args.path,
+        args.paths,
         trackers=args.trackers,
         nodes=args.nodes,
         piece_length=args.piece_length,
@@ -1345,6 +1384,7 @@ def main() -> None:
         exclude=args.exclude,
         exclude_pattern=args.exclude_pattern,
         exclude_pattern_ci=args.exclude_pattern_ci,
+        relative_to=args.relative_to,
         date=args.date,
         name=args.name,
         threads=args.threads,

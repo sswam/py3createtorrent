@@ -43,7 +43,7 @@ def main():
                 if os.path.isfile(torrent_file):
                     os.remove(torrent_file)
 
-                cmd = r'python src\py3createtorrent.py --no-created-by -c "" --date -2 %s -p %d -o %s' % (
+                cmd = r'python src{}py3createtorrent.py --no-created-by -c "" --date -2 %s -p %d -o %s'.format(os.sep) % (
                     target_path, p, torrent_file)
                 if args.test_threads:
                     cmd += " --threads %d" % t
